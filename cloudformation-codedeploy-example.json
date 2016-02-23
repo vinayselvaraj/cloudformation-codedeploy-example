@@ -1,0 +1,303 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description" : "Sample template that uses CodeDeploy to deploy to an AutoScaling Group",
+  
+  "Parameters" : {
+    
+    "InstanceType" : {
+      "Description" : "Instance Type",
+      "Type" : "String",
+      "Default" : "t2.micro"
+    },
+    
+    "KeyName" : {
+      "Description" : "The EC2 Key Pair to allow SSH access to the instances",
+      "Type" : "AWS::EC2::KeyPair::KeyName",
+      "Default" : "default"
+    },
+    
+    "VPCId" : {
+      "Description" : "VPC ID to launch the stack in",
+      "Type" : "AWS::EC2::VPC::Id"
+    },
+    
+    "VPCSubnets" : {
+      "Description" : "Subnets to use for the AutoScaling group",
+      "Type" : "List<AWS::EC2::Subnet::Id>"
+    }
+    
+  },
+  
+  "Mappings" : {
+    
+    "AWSRegionArch2AMI" : {
+      "us-east-1"      : { "AMI" : "ami-60b6c60a" },
+      "us-west-1"      : { "AMI" : "ami-d5ea86b5" },
+      "us-west-2"      : { "AMI" : "ami-f0091d91" },
+      "eu-west-1"      : { "AMI" : "ami-bff32ccc" },
+      "eu-central-1"   : { "AMI" : "ami-bc5b48d0" },
+      "ap-southeast-1" : { "AMI" : "ami-c9b572aa" },
+      "ap-southeast-2" : { "AMI" : "ami-48d38c2b" },
+      "ap-northeast-1" : { "AMI" : "ami-383c1956" },
+      "ap-northeast-2" : { "AMI" : "ami-249b554a" }
+    }
+    
+  },
+  
+  
+  "Resources" : {
+    
+    "InstanceSG" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Security Group",
+        "VpcId" : { "Ref" : "VPCId" }
+      }
+    },
+    
+    "InstanceSGSelfIngress" : {
+      "Type" : "AWS::EC2::SecurityGroupIngress",
+      "Properties" : {
+        "GroupId" : { "Ref" : "InstanceSG" },
+        "IpProtocol" : "-1",
+        "ToPort" : "65535",
+        "FromPort" : "0",
+        "SourceSecurityGroupId" : { "Ref" : "InstanceSG" }
+      }
+    },
+    
+    "InstanceSGELBTCP80Ingress" : {
+      "Type" : "AWS::EC2::SecurityGroupIngress",
+      "Properties" : {
+        "GroupId" : { "Ref" : "InstanceSG" },
+        "IpProtocol" : "tcp",
+        "ToPort" : "80",
+        "FromPort" : "80",
+        "SourceSecurityGroupId" : { "Ref" : "ELBSG" }
+      }
+    },
+    
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "commands" : {
+              "01_fetch_codedeploy_agent" : {
+                "command" : {"Fn::Join" : ["", ["aws s3 cp s3://aws-codedeploy-", { "Ref" : "AWS::Region" }, "/latest/install /tmp --region ", { "Ref" : "AWS::Region" }]]}
+              },
+              "02_run_codedeploy_agent" : {
+                "command" : "chmod +x /tmp/install && /tmp/install auto"
+              }
+            },
+            "packages" : {
+              "yum" : {
+                "httpd" : []
+              }
+            },
+            "services" : {
+              "sysvinit" : {
+                "httpd" : {
+                  "enabled" : "true",
+                  "ensureRunning" : "true",
+                  "packages" : { "yum" : [ "httpd"] }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Properties" : {
+        "KeyName" : { "Ref" : "KeyName" },
+        "AssociatePublicIpAddress" : "true",
+        "ImageId" : {
+          "Fn::FindInMap" : [
+            "AWSRegionArch2AMI",
+            { "Ref" : "AWS::Region" },
+            "AMI"
+          ]
+        },
+        "InstanceType" : { "Ref" : "InstanceType" },
+        "IamInstanceProfile" : { "Ref" : "EC2InstProfile" },
+        "SecurityGroups" : [ { "Ref" : "InstanceSG" } ],
+        "UserData"        : {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n",
+                "/opt/aws/bin/cfn-init --region ", 
+                  { "Ref": "AWS::Region"}, 
+                  " -s ", { "Ref" : "AWS::StackName" }, 
+                  " -r LaunchConfig"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    
+    "AutoScalingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "VPCZoneIdentifier" : { "Ref" : "VPCSubnets" },
+        "MinSize" : "1",
+        "MaxSize" : "10",
+        "LoadBalancerNames" : [ { "Ref" : "ELB" } ],
+        "Tags" : [
+          { "Key" : "Name", "Value" : "cfn-codedeploy-example", "PropagateAtLaunch" : "true" }
+        ]
+      }
+    },
+    
+    "EC2IAMRole" : {
+      "Type": "AWS::IAM::Role",
+      "Properties" : {
+        "AssumeRolePolicyDocument" : {
+          "Version" : "2012-10-17",
+          "Statement" : [ {
+            "Effect" : "Allow",
+            "Principal" : {
+              "Service" : [ "ec2.amazonaws.com" ]
+            },
+            "Action" : [ "sts:AssumeRole" ]
+          }]
+        },
+        
+        "Path" : "/",
+        
+        "Policies" : [ {
+          "PolicyName" : "InstancePolicy",
+          "PolicyDocument" : {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "s3:Get*",
+                  "s3:List*"
+                ],
+                "Resource": [
+                  "arn:aws:s3:::aws-codedeploy-us-east-1/*",
+                  "arn:aws:s3:::aws-codedeploy-us-west-2/*",
+                  "arn:aws:s3:::aws-codedeploy-us-west-1/*",
+                  "arn:aws:s3:::aws-codedeploy-eu-west-1/*",
+                  "arn:aws:s3:::aws-codedeploy-eu-central-1/*",
+                  "arn:aws:s3:::aws-codedeploy-ap-southeast-1/*",
+                  "arn:aws:s3:::aws-codedeploy-ap-southeast-2/*",
+                  "arn:aws:s3:::aws-codedeploy-ap-northeast-1/*"
+                ]
+              }
+            ]
+          }
+        }]
+      }
+    },
+    
+    "EC2InstProfile" : {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties" : {
+        "Path" : "/",
+        "Roles" : [ { "Ref" : "EC2IAMRole" } ]
+      }
+    },
+    
+
+    
+    "CodeDeployServiceIAMRole" : {
+      "Type": "AWS::IAM::Role",
+        "Properties" : {
+          "AssumeRolePolicyDocument" : {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "CodeDeployTrustPolicy",
+                "Effect": "Allow",
+                "Principal": {
+                "Service": [ "codedeploy.amazonaws.com" ]
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Path" : "/",
+        "ManagedPolicyArns" : [ "arn:aws:iam::aws:policy/service-role/AWSCodeDeployRole" ]
+      }
+    },
+    
+    "ELBSG" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "ELB Security Group",
+        "VpcId" : { "Ref" : "VPCId" }
+      }
+    },
+    
+    "ELBSGSelfIngress" : {
+      "Type" : "AWS::EC2::SecurityGroupIngress",
+      "Properties" : {
+        "GroupId" : { "Ref" : "ELBSG" },
+        "IpProtocol" : "-1",
+        "ToPort" : "65535",
+        "FromPort" : "0",
+        "SourceSecurityGroupId" : { "Ref" : "ELBSG" }
+      }
+    },
+    
+    "ELBSGPublicTCP80Ingress" : {
+      "Type" : "AWS::EC2::SecurityGroupIngress",
+      "Properties" : {
+        "GroupId" : { "Ref" : "ELBSG" },
+        "IpProtocol" : "tcp",
+        "ToPort" : "80",
+        "FromPort" : "80",
+        "CidrIp" : "0.0.0.0/0"
+      }
+    },
+    
+    "ELB" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "Listeners": [
+          {
+            "LoadBalancerPort" : "80",
+            "InstancePort": "80",
+            "Protocol": "TCP"
+          },
+          {
+            "LoadBalancerPort" : "443",
+            "InstancePort": "443",
+            "Protocol": "TCP"
+          }
+        ],
+        
+        "SecurityGroups" : [ { "Ref" : "ELBSG" } ],
+        
+        "Subnets": { "Ref" : "VPCSubnets" },
+        
+        "HealthCheck": {
+          "Target": "TCP:80",
+          "HealthyThreshold": "3",
+          "Interval": "5",
+          "Timeout": "3",
+          "UnhealthyThreshold": "2"
+        },
+        
+        "ConnectionDrainingPolicy": {
+          "Enabled" : "true",
+          "Timeout" : "60"
+        },
+        
+        "CrossZone": "true"
+      }
+    }
+  },
+  
+  "Outputs" : {
+    "endpoint" : {
+      "Value" : { "Fn::GetAtt" : [ "ELB", "DNSName" ]}
+    }
+  }
+  
+}
